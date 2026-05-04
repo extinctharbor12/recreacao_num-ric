@@ -1,4 +1,4 @@
-# sorte-analise-data
+# analise-matematica-data
 
 Dados públicos utilizados de forma recreativas numéricos atualizados 1x ao dia.
 
