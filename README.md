@@ -1,10 +1,16 @@
-# analise-matematica-data
+# numeric-series
 
-Dados públicos utilizados de forma recreativas numéricos atualizados 1x ao dia.
+Aggregator of public numeric series. Updated automatically once a day.
 
-## Modalidades
+## Public URLs
 
-## Atualização automática
+- Records: `data/series.json`
+- Metadata: `data/metadata.json`
 
-GitHub Actions roda `update_draws.py` 2x ao dia (08h e 20h horário de Brasília).
-Veja a aba **Actions** acima.
+## Series
+
+`senarius` · `quindecim` · `quinarius` · `vigintus` · `septenus` · `duplex` · `mensarius` · `septemcol` · `senatrev`
+
+## Schedule
+
+Daily run at 19:00 UTC with rotating offset. Failure triggers retry next morning.
