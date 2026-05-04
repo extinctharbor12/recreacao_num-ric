@@ -1,0 +1,186 @@
+name: Collector
+
+on:
+  schedule:
+    - cron: '0 19 * * *'   # 16:00 BR
+    - cron: '0 9 * * *'    # 06:00 BR (retry)
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: pip install requests
+
+      - name: Decide
+        id: decide
+        run: |
+          python3 << 'PY'
+          import json, os
+          from datetime import datetime, timezone, timedelta
+          from pathlib import Path
+
+          state_file = Path('data/state.json')
+          state = {}
+          if state_file.exists():
+              try:
+                  with state_file.open('r') as f:
+                      state = json.load(f)
+              except Exception:
+                  state = {}
+
+          now = datetime.now(timezone.utc)
+          h = now.hour
+          is_main = 18 <= h <= 22
+          is_retry = 8 <= h <= 12
+
+          should_run = False
+          reason = ""
+
+          if is_main:
+              should_run = True
+              reason = "main window"
+          elif is_retry:
+              if state.get('last_status') == 'error':
+                  last_err = state.get('last_error_at', '')
+                  try:
+                      le = datetime.fromisoformat(last_err)
+                      if (now - le) < timedelta(hours=24):
+                          should_run = True
+                          reason = "retry"
+                      else:
+                          reason = "old error, skipping retry"
+                  except Exception:
+                      should_run = True
+                      reason = "retry (invalid timestamp)"
+              else:
+                  reason = "retry window but last run OK"
+          else:
+              should_run = True
+              reason = "manual"
+
+          # Rotating offset: 15s/day from 2026-01-01, capped at 10 min
+          anchor = datetime(2026, 1, 1, tzinfo=timezone.utc)
+          days = (now - anchor).days
+          offset = (days * 15) % 600
+
+          gh_out = os.environ['GITHUB_OUTPUT']
+          with open(gh_out, 'a') as f:
+              f.write(f"should_run={'true' if should_run else 'false'}\n")
+              f.write(f"reason={reason}\n")
+              f.write(f"offset={offset}\n")
+
+          print(f"━━━ Decision ━━━", flush=True)
+          print(f"  utc       : {now.isoformat()}", flush=True)
+          print(f"  main      : {is_main}", flush=True)
+          print(f"  retry     : {is_retry}", flush=True)
+          print(f"  prev state: {state.get('last_status', 'unknown')}", flush=True)
+          print(f"  decision  : {'RUN' if should_run else 'SKIP'}", flush=True)
+          print(f"  reason    : {reason}", flush=True)
+          print(f"  offset    : {offset}s (day {days})", flush=True)
+          PY
+
+      - name: Wait offset
+        if: steps.decide.outputs.should_run == 'true'
+        run: |
+          echo "Waiting ${{ steps.decide.outputs.offset }}s..."
+          sleep ${{ steps.decide.outputs.offset }}
+
+      - name: Collect
+        if: steps.decide.outputs.should_run == 'true'
+        id: collect
+        continue-on-error: true
+        run: python collect.py
+
+      - name: Update meta + state (success)
+        if: steps.decide.outputs.should_run == 'true' && steps.collect.outcome == 'success'
+        run: |
+          python3 << 'PY'
+          import json
+          from datetime import datetime, timezone
+
+          with open('data/series.json') as f:
+              data = json.load(f)
+          counts = {k: len(v) for k, v in data.items() if isinstance(v, list)}
+          total = sum(counts.values())
+          now = datetime.now(timezone.utc)
+          meta = {
+              'updated_at': now.isoformat(),
+              'total': total,
+              'counts': counts,
+              'version': int(now.timestamp()),
+          }
+          with open('data/metadata.json', 'w') as f:
+              json.dump(meta, f, indent=2)
+
+          state = {
+              'last_status': 'ok',
+              'last_run_at': now.isoformat(),
+              'last_total': total,
+          }
+          with open('data/state.json', 'w') as f:
+              json.dump(state, f, indent=2)
+
+          print(f"✓ Total: {total} records in {len(counts)} series", flush=True)
+          PY
+
+      - name: Save error state + log
+        if: steps.decide.outputs.should_run == 'true' && steps.collect.outcome == 'failure'
+        run: |
+          mkdir -p logs
+          python3 << 'PY'
+          import json, os
+          from datetime import datetime, timezone
+
+          now = datetime.now(timezone.utc)
+          state = {
+              'last_status': 'error',
+              'last_error_at': now.isoformat(),
+              'last_run_at': now.isoformat(),
+          }
+          with open('data/state.json', 'w') as f:
+              json.dump(state, f, indent=2)
+
+          log_name = f"logs/error_{now.strftime('%Y-%m-%d_%H%M%S')}.log"
+          server = os.environ.get('GITHUB_SERVER_URL', '')
+          repo = os.environ.get('GITHUB_REPOSITORY', '')
+          rid = os.environ.get('GITHUB_RUN_ID', '')
+          with open(log_name, 'w') as f:
+              f.write(f"Error at {now.isoformat()}\n")
+              f.write(f"Run: {server}/{repo}/actions/runs/{rid}\n")
+              f.write(f"Rescheduled for: next day 09:00 UTC\n")
+          print(f"✗ Error logged: {log_name}", flush=True)
+          PY
+
+      - name: Commit
+        if: steps.decide.outputs.should_run == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/ logs/ 2>/dev/null || true
+          if git diff --quiet --cached; then
+            echo "No changes."
+          else
+            if [ "${{ steps.collect.outcome }}" = "success" ]; then
+              total=$(python3 -c "import json; print(json.load(open('data/metadata.json'))['total'])")
+              git commit -m "${total} records"
+            else
+              git commit -m "error — retry next cycle"
+            fi
+            git push
+          fi
+
+      - name: Fail if collector errored
+        if: steps.decide.outputs.should_run == 'true' && steps.collect.outcome == 'failure'
+        run: |
+          echo "::error::Collector failed."
+          exit 1
