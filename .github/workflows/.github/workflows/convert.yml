@@ -1,0 +1,23 @@
+name: Convert v1 to v2
+on: workflow_dispatch
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python convert_to_v2.py
+      - name: Commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/series.json
+          git rm data/draws.json
+          git rm convert_to_v2.py
+          git rm .github/workflows/convert.yml
+          git commit -m "convert v1 to v2"
+          git push
