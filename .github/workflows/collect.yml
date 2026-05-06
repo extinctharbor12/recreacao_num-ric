@@ -68,7 +68,6 @@ jobs:
               should_run = True
               reason = "manual"
 
-          # Rotating offset: 15s/day from 2026-01-01, capped at 10 min
           anchor = datetime(2026, 1, 1, tzinfo=timezone.utc)
           days = (now - anchor).days
           offset = (days * 15) % 600
@@ -81,9 +80,6 @@ jobs:
 
           print(f"━━━ Decision ━━━", flush=True)
           print(f"  utc       : {now.isoformat()}", flush=True)
-          print(f"  main      : {is_main}", flush=True)
-          print(f"  retry     : {is_retry}", flush=True)
-          print(f"  prev state: {state.get('last_status', 'unknown')}", flush=True)
           print(f"  decision  : {'RUN' if should_run else 'SKIP'}", flush=True)
           print(f"  reason    : {reason}", flush=True)
           print(f"  offset    : {offset}s (day {days})", flush=True)
@@ -101,11 +97,25 @@ jobs:
         continue-on-error: true
         run: python collect.py
 
+      - name: Verify (debug)
+        if: steps.decide.outputs.should_run == 'true' && steps.collect.outcome == 'success'
+        run: |
+          echo "━━━ Files in data/ ━━━"
+          ls -la data/
+          echo ""
+          echo "━━━ git status ━━━"
+          git status --short
+          echo ""
+          echo "━━━ series.json size ━━━"
+          wc -c data/series.json || echo "series.json not found!"
+          echo ""
+          python3 -c "import json; d=json.load(open('data/series.json')); print('senarius last id:', d['senarius'][-1]['id'] if d.get('senarius') else 'EMPTY')"
+
       - name: Update meta + state (success)
         if: steps.decide.outputs.should_run == 'true' && steps.collect.outcome == 'success'
         run: |
           python3 << 'PY'
-          import json
+          import json, os
           from datetime import datetime, timezone
 
           with open('data/series.json') as f:
@@ -131,6 +141,7 @@ jobs:
               json.dump(state, f, indent=2)
 
           print(f"✓ Total: {total} records in {len(counts)} series", flush=True)
+          print(f"  metadata.json size: {os.path.getsize('data/metadata.json')} bytes", flush=True)
           PY
 
       - name: Save error state + log
@@ -166,9 +177,20 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/ logs/ 2>/dev/null || true
+
+          # Force-add ALL changes including untracked files in data/ and logs/
+          git add -A data/ 2>/dev/null || true
+          git add -A logs/ 2>/dev/null || true
+
+          echo "━━━ git diff --cached --stat ━━━"
+          git diff --cached --stat
+          echo ""
+          echo "━━━ git status ━━━"
+          git status --short
+          echo ""
+
           if git diff --quiet --cached; then
-            echo "No changes."
+            echo "❌ No changes detected by git. This shouldn't happen if collect ran successfully."
           else
             if [ "${{ steps.collect.outcome }}" = "success" ]; then
               total=$(python3 -c "import json; print(json.load(open('data/metadata.json'))['total'])")
@@ -177,6 +199,7 @@ jobs:
               git commit -m "error — retry next cycle"
             fi
             git push
+            echo "✓ Pushed"
           fi
 
       - name: Fail if collector errored
