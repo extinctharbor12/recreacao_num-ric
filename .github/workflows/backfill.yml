@@ -1,0 +1,171 @@
+name: Backfill series
+
+# Workflow temporário para refazer o seed completo de uma série
+# Detecta gaps (IDs faltando) e baixa só o que falta.
+
+on:
+  workflow_dispatch:
+    inputs:
+      series:
+        description: 'Codinome da série (ex: quindecim, senarius)'
+        required: true
+        default: 'quindecim'
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: pip install requests
+
+      - name: Backfill
+        run: |
+          python3 << 'PY'
+          import json, time, sys
+          from pathlib import Path
+          import requests
+
+          SERIES = '${{ inputs.series }}'
+          PATHS = {
+              'senarius':  'megasena',
+              'quindecim': 'lotofacil',
+              'quinarius': 'quina',
+              'vigintus':  'lotomania',
+              'septenus':  'timemania',
+              'duplex':    'duplasena',
+              'mensarius': 'diadesorte',
+              'septemcol': 'supersete',
+              'senatrev':  'maismilionaria',
+          }
+          EXTRA_LABEL = {'mensarius'}
+          EXTRA_SET = {'senatrev'}
+
+          if SERIES not in PATHS:
+              print(f"❌ série inválida: {SERIES}")
+              sys.exit(1)
+
+          path = PATHS[SERIES]
+          base = 'https://' + 'servicebus2' + '.' + 'caixa' + '.gov.br' + '/portaldeloterias' + '/api/'
+
+          def http_get_json(url, retries=4):
+              for i in range(retries):
+                  try:
+                      r = requests.get(url, timeout=30, headers={
+                          'User-Agent': 'Mozilla/5.0 (compatible; SeriesCollector/1.0)',
+                          'Accept': 'application/json',
+                      })
+                      r.raise_for_status()
+                      return r.json()
+                  except Exception as e:
+                      if i < retries - 1: time.sleep(2 ** i)
+              return None
+
+          # 1. Get latest from upstream
+          latest = http_get_json(f"{base}{path}/")
+          if not latest:
+              print("❌ upstream indisponível")
+              sys.exit(1)
+          latest_id = latest['numero']
+          print(f"upstream latest = {latest_id}")
+
+          # 2. Load existing
+          data_file = Path('data/series.json')
+          with data_file.open('r') as f:
+              all_data = json.load(f)
+          existing = all_data.get(SERIES, [])
+          existing_ids = set(d.get('id') for d in existing)
+          print(f"local existing = {len(existing)} (max id = {max(existing_ids) if existing_ids else 0})")
+
+          # 3. Find ALL missing IDs from 1 to latest_id
+          missing = [n for n in range(1, latest_id + 1) if n not in existing_ids]
+          print(f"missing IDs: {len(missing)}")
+          if not missing:
+              print("✓ nada para fazer")
+              sys.exit(0)
+
+          # 4. Fetch missing
+          new_records = []
+          for i, n in enumerate(missing, 1):
+              raw = http_get_json(f"{base}{path}/{n}")
+              if not raw or 'numero' not in raw:
+                  print(f"  ✗ skip {n}: no data")
+                  continue
+              try:
+                  elements = sorted([int(x) for x in raw.get('listaDezenas', []) or []])
+                  if not elements: continue
+                  rec = {
+                      'id': raw['numero'],
+                      'date': raw.get('dataApuracao', ''),
+                      'values': elements,
+                  }
+                  # Convert date dd/mm/yyyy → yyyy-mm-dd
+                  if '/' in rec['date']:
+                      d, m, y = rec['date'].split('/')
+                      rec['date'] = f"{y}-{m.zfill(2)}-{d.zfill(2)}"
+                  if SERIES in EXTRA_LABEL:
+                      label = raw.get('nomeTimeCoracaoMesSorte') or raw.get('mesDeSorte')
+                      if label and label.strip(): rec['label'] = label.strip().capitalize()
+                  if SERIES in EXTRA_SET:
+                      extra = raw.get('trevosSorteados') or raw.get('listaDezenasSegundoSorteio') or []
+                      if extra: rec['extra'] = sorted([int(x) for x in extra])
+                  new_records.append(rec)
+                  if i % 100 == 0 or i == len(missing):
+                      print(f"  [{i}/{len(missing)}] id {n}", flush=True)
+              except Exception as e:
+                  print(f"  ✗ {n}: {e}")
+              time.sleep(0.3)
+
+          # 5. Merge and save
+          merged = existing + new_records
+          # Sort by id
+          merged.sort(key=lambda x: x.get('id', 0))
+          all_data[SERIES] = merged
+
+          with data_file.open('w') as f:
+              json.dump(all_data, f, ensure_ascii=False, separators=(',', ':'))
+
+          print(f"\n✓ Adicionados {len(new_records)} registros. Total: {len(merged)}")
+          PY
+
+      - name: Update meta
+        run: |
+          python3 << 'PY'
+          import json, os
+          from datetime import datetime, timezone
+          with open('data/series.json') as f:
+              data = json.load(f)
+          counts = {k: len(v) for k, v in data.items() if isinstance(v, list)}
+          total = sum(counts.values())
+          now = datetime.now(timezone.utc)
+          meta = {
+              'updated_at': now.isoformat(),
+              'total': total,
+              'counts': counts,
+              'version': int(now.timestamp()),
+          }
+          with open('data/metadata.json', 'w') as f:
+              json.dump(meta, f, indent=2)
+          print(f"✓ metadata: total={total}")
+          for k, v in counts.items():
+              print(f"  {k}: {v}")
+          PY
+
+      - name: Commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A data/
+          if git diff --quiet --cached; then
+            echo "No changes"
+          else
+            git commit -m "backfill ${{ inputs.series }}"
+            git push
+          fi
