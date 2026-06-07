@@ -1,13 +1,14 @@
 name: Backfill series
 
-# Workflow temporário para refazer o seed completo de uma série
-# Detecta gaps (IDs faltando) e baixa só o que falta.
+# Workflow para refazer o seed de uma serie.
+# Detecta gaps (IDs faltando) E registros malformados (qtd errada de
+# dezenas), e baixa/refaz so o que falta da Caixa.
 
 on:
   workflow_dispatch:
     inputs:
       series:
-        description: 'Codinome da série (ex: quindecim, senarius)'
+        description: 'Codinome da serie (ex: quindecim, senarius, septenus)'
         required: true
         default: 'quindecim'
 
@@ -45,11 +46,16 @@ jobs:
               'septemcol': 'supersete',
               'senatrev':  'maismilionaria',
           }
+          # Quantidade ESPERADA de dezenas por serie (para detectar malformados)
+          EXPECTED = {
+              'senarius': 6, 'quindecim': 15, 'quinarius': 5, 'vigintus': 20,
+              'septenus': 7, 'duplex': 6, 'mensarius': 7, 'septemcol': 7, 'senatrev': 6,
+          }
           EXTRA_LABEL = {'mensarius'}
           EXTRA_SET = {'senatrev'}
 
           if SERIES not in PATHS:
-              print(f"❌ série inválida: {SERIES}")
+              print(f"X serie invalida: {SERIES}")
               sys.exit(1)
 
           path = PATHS[SERIES]
@@ -71,7 +77,7 @@ jobs:
           # 1. Get latest from upstream
           latest = http_get_json(f"{base}{path}/")
           if not latest:
-              print("❌ upstream indisponível")
+              print("X upstream indisponivel")
               sys.exit(1)
           latest_id = latest['numero']
           print(f"upstream latest = {latest_id}")
@@ -81,6 +87,17 @@ jobs:
           with data_file.open('r') as f:
               all_data = json.load(f)
           existing = all_data.get(SERIES, [])
+
+          # 2b. Descarta registros MALFORMADOS (qtd de dezenas != esperado) para
+          #     que sejam refeitos. Pega casos como o #1307 da timemania, que
+          #     tinha 8 dezenas em vez de 7. Apenas a CONTAGEM e checada (seguro).
+          exp = EXPECTED.get(SERIES)
+          if exp:
+              bad = [d.get('id') for d in existing if len(d.get('values', []) or []) != exp]
+              if bad:
+                  existing = [d for d in existing if len(d.get('values', []) or []) == exp]
+                  print(f"! removidos {len(bad)} registro(s) malformado(s) (serao refeitos): {bad}")
+
           existing_ids = set(d.get('id') for d in existing)
           print(f"local existing = {len(existing)} (max id = {max(existing_ids) if existing_ids else 0})")
 
@@ -88,7 +105,7 @@ jobs:
           missing = [n for n in range(1, latest_id + 1) if n not in existing_ids]
           print(f"missing IDs: {len(missing)}")
           if not missing:
-              print("✓ nada para fazer")
+              print("OK nada para fazer")
               sys.exit(0)
 
           # 4. Fetch missing
@@ -96,7 +113,7 @@ jobs:
           for i, n in enumerate(missing, 1):
               raw = http_get_json(f"{base}{path}/{n}")
               if not raw or 'numero' not in raw:
-                  print(f"  ✗ skip {n}: no data")
+                  print(f"  x skip {n}: no data")
                   continue
               try:
                   elements = sorted([int(x) for x in raw.get('listaDezenas', []) or []])
@@ -106,7 +123,7 @@ jobs:
                       'date': raw.get('dataApuracao', ''),
                       'values': elements,
                   }
-                  # Convert date dd/mm/yyyy → yyyy-mm-dd
+                  # Convert date dd/mm/yyyy -> yyyy-mm-dd
                   if '/' in rec['date']:
                       d, m, y = rec['date'].split('/')
                       rec['date'] = f"{y}-{m.zfill(2)}-{d.zfill(2)}"
@@ -120,19 +137,18 @@ jobs:
                   if i % 100 == 0 or i == len(missing):
                       print(f"  [{i}/{len(missing)}] id {n}", flush=True)
               except Exception as e:
-                  print(f"  ✗ {n}: {e}")
+                  print(f"  x {n}: {e}")
               time.sleep(0.3)
 
           # 5. Merge and save
           merged = existing + new_records
-          # Sort by id
           merged.sort(key=lambda x: x.get('id', 0))
           all_data[SERIES] = merged
 
           with data_file.open('w') as f:
               json.dump(all_data, f, ensure_ascii=False, separators=(',', ':'))
 
-          print(f"\n✓ Adicionados {len(new_records)} registros. Total: {len(merged)}")
+          print(f"\nOK Adicionados/refeitos {len(new_records)} registros. Total: {len(merged)}")
           PY
 
       - name: Update meta
@@ -153,7 +169,7 @@ jobs:
           }
           with open('data/metadata.json', 'w') as f:
               json.dump(meta, f, indent=2)
-          print(f"✓ metadata: total={total}")
+          print(f"OK metadata: total={total}")
           for k, v in counts.items():
               print(f"  {k}: {v}")
           PY
