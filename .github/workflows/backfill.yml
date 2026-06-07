@@ -1,19 +1,23 @@
-name: Backfill series
+name: Backfill ALL
 
-# Workflow para refazer o seed de uma serie.
-# Detecta gaps (IDs faltando) E registros malformados (qtd errada de
-# dezenas), e baixa/refaz so o que falta da Caixa.
+# Roda o backfill de TODAS as series (ou de uma especifica) num unico job
+# sequencial: detecta gaps + registros malformados, refaz da Caixa, e faz
+# UM commit no final. Sem corrida interna.
 
 on:
   workflow_dispatch:
     inputs:
       series:
-        description: 'Codinome da serie (ex: quindecim, senarius, septenus)'
+        description: "Codinome especifico, ou 'all' para todas"
         required: true
-        default: 'quindecim'
+        default: 'all'
+
+concurrency:
+  group: data-writer
+  cancel-in-progress: false
 
 jobs:
-  backfill:
+  backfill-all:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -27,14 +31,16 @@ jobs:
       - name: Install deps
         run: pip install requests
 
-      - name: Backfill
+      - name: Backfill (all)
+        id: backfill
         run: |
           python3 << 'PY'
-          import json, time, sys
+          import json, time, sys, os
           from pathlib import Path
           import requests
 
-          SERIES = '${{ inputs.series }}'
+          WHICH = '${{ inputs.series }}'.strip() or 'all'
+
           PATHS = {
               'senarius':  'megasena',
               'quindecim': 'lotofacil',
@@ -46,7 +52,6 @@ jobs:
               'septemcol': 'supersete',
               'senatrev':  'maismilionaria',
           }
-          # Quantidade ESPERADA de dezenas por serie (para detectar malformados)
           EXPECTED = {
               'senarius': 6, 'quindecim': 15, 'quinarius': 5, 'vigintus': 20,
               'septenus': 7, 'duplex': 6, 'mensarius': 7, 'septemcol': 7, 'senatrev': 6,
@@ -54,12 +59,13 @@ jobs:
           EXTRA_LABEL = {'mensarius'}
           EXTRA_SET = {'senatrev'}
 
-          if SERIES not in PATHS:
-              print(f"X serie invalida: {SERIES}")
-              sys.exit(1)
-
-          path = PATHS[SERIES]
           base = 'https://' + 'servicebus2' + '.' + 'caixa' + '.gov.br' + '/portaldeloterias' + '/api/'
+
+          def set_changed(v):
+              go = os.environ.get('GITHUB_OUTPUT')
+              if go:
+                  with open(go, 'a') as f:
+                      f.write(f"changed={'true' if v else 'false'}\n")
 
           def http_get_json(url, retries=4):
               for i in range(retries):
@@ -70,91 +76,98 @@ jobs:
                       })
                       r.raise_for_status()
                       return r.json()
-                  except Exception as e:
+                  except Exception:
                       if i < retries - 1: time.sleep(2 ** i)
               return None
 
-          # 1. Get latest from upstream
-          latest = http_get_json(f"{base}{path}/")
-          if not latest:
-              print("X upstream indisponivel")
+          if WHICH == 'all':
+              targets = list(PATHS.keys())
+          elif WHICH in PATHS:
+              targets = [WHICH]
+          else:
+              print(f"X serie invalida: {WHICH}")
+              set_changed(False)
               sys.exit(1)
-          latest_id = latest['numero']
-          print(f"upstream latest = {latest_id}")
 
-          # 2. Load existing
           data_file = Path('data/series.json')
           with data_file.open('r') as f:
               all_data = json.load(f)
-          existing = all_data.get(SERIES, [])
 
-          # 2b. Descarta registros MALFORMADOS (qtd de dezenas != esperado) para
-          #     que sejam refeitos. Pega casos como o #1307 da timemania, que
-          #     tinha 8 dezenas em vez de 7. Apenas a CONTAGEM e checada (seguro).
-          exp = EXPECTED.get(SERIES)
-          if exp:
-              bad = [d.get('id') for d in existing if len(d.get('values', []) or []) != exp]
-              if bad:
-                  existing = [d for d in existing if len(d.get('values', []) or []) == exp]
-                  print(f"! removidos {len(bad)} registro(s) malformado(s) (serao refeitos): {bad}")
+          grand_new = 0
+          grand_removed = 0
 
-          existing_ids = set(d.get('id') for d in existing)
-          print(f"local existing = {len(existing)} (max id = {max(existing_ids) if existing_ids else 0})")
-
-          # 3. Find ALL missing IDs from 1 to latest_id
-          missing = [n for n in range(1, latest_id + 1) if n not in existing_ids]
-          print(f"missing IDs: {len(missing)}")
-          if not missing:
-              print("OK nada para fazer")
-              sys.exit(0)
-
-          # 4. Fetch missing
-          new_records = []
-          for i, n in enumerate(missing, 1):
-              raw = http_get_json(f"{base}{path}/{n}")
-              if not raw or 'numero' not in raw:
-                  print(f"  x skip {n}: no data")
+          for SERIES in targets:
+              path = PATHS[SERIES]
+              print(f"\n=== {SERIES} ({path}) ===", flush=True)
+              latest = http_get_json(f"{base}{path}/")
+              if not latest or 'numero' not in latest:
+                  print(f"  ! upstream indisponivel para {path} - pulando")
                   continue
-              try:
-                  elements = sorted([int(x) for x in raw.get('listaDezenas', []) or []])
-                  if not elements: continue
-                  rec = {
-                      'id': raw['numero'],
-                      'date': raw.get('dataApuracao', ''),
-                      'values': elements,
-                  }
-                  # Convert date dd/mm/yyyy -> yyyy-mm-dd
-                  if '/' in rec['date']:
-                      d, m, y = rec['date'].split('/')
-                      rec['date'] = f"{y}-{m.zfill(2)}-{d.zfill(2)}"
-                  if SERIES in EXTRA_LABEL:
-                      label = raw.get('nomeTimeCoracaoMesSorte') or raw.get('mesDeSorte')
-                      if label and label.strip(): rec['label'] = label.strip().capitalize()
-                  if SERIES in EXTRA_SET:
-                      extra = raw.get('trevosSorteados') or raw.get('listaDezenasSegundoSorteio') or []
-                      if extra: rec['extra'] = sorted([int(x) for x in extra])
-                  new_records.append(rec)
-                  if i % 100 == 0 or i == len(missing):
-                      print(f"  [{i}/{len(missing)}] id {n}", flush=True)
-              except Exception as e:
-                  print(f"  x {n}: {e}")
-              time.sleep(0.3)
+              latest_id = latest['numero']
 
-          # 5. Merge and save
-          merged = existing + new_records
-          merged.sort(key=lambda x: x.get('id', 0))
-          all_data[SERIES] = merged
+              existing = all_data.get(SERIES, [])
+              exp = EXPECTED.get(SERIES)
+              removed = 0
+              if exp:
+                  bad = [d.get('id') for d in existing if len(d.get('values', []) or []) != exp]
+                  if bad:
+                      removed = len(bad)
+                      existing = [d for d in existing if len(d.get('values', []) or []) == exp]
+                      print(f"  ! removidos {removed} malformado(s): {bad}")
 
-          with data_file.open('w') as f:
-              json.dump(all_data, f, ensure_ascii=False, separators=(',', ':'))
+              existing_ids = set(d.get('id') for d in existing)
+              missing = [n for n in range(1, latest_id + 1) if n not in existing_ids]
+              print(f"  upstream={latest_id} local={len(existing)} faltando={len(missing)}")
+              if not missing:
+                  all_data[SERIES] = existing
+                  continue
 
-          print(f"\nOK Adicionados/refeitos {len(new_records)} registros. Total: {len(merged)}")
+              new_records = []
+              for i, n in enumerate(missing, 1):
+                  raw = http_get_json(f"{base}{path}/{n}")
+                  if not raw or 'numero' not in raw:
+                      print(f"    x skip {n}: no data")
+                      continue
+                  try:
+                      elements = sorted([int(x) for x in raw.get('listaDezenas', []) or []])
+                      if not elements: continue
+                      rec = {'id': raw['numero'], 'date': raw.get('dataApuracao', ''), 'values': elements}
+                      if '/' in rec['date']:
+                          d, m, y = rec['date'].split('/')
+                          rec['date'] = f"{y}-{m.zfill(2)}-{d.zfill(2)}"
+                      if SERIES in EXTRA_LABEL:
+                          label = raw.get('nomeTimeCoracaoMesSorte') or raw.get('mesDeSorte')
+                          if label and label.strip(): rec['label'] = label.strip().capitalize()
+                      if SERIES in EXTRA_SET:
+                          extra = raw.get('trevosSorteados') or raw.get('listaDezenasSegundoSorteio') or []
+                          if extra: rec['extra'] = sorted([int(x) for x in extra])
+                      new_records.append(rec)
+                      if i % 100 == 0 or i == len(missing):
+                          print(f"    [{i}/{len(missing)}] id {n}", flush=True)
+                  except Exception as e:
+                      print(f"    x {n}: {e}")
+                  time.sleep(0.3)
+
+              merged = existing + new_records
+              merged.sort(key=lambda x: x.get('id', 0))
+              all_data[SERIES] = merged
+              grand_new += len(new_records)
+              grand_removed += removed
+              print(f"  OK {SERIES}: +{len(new_records)} (total {len(merged)})")
+
+          changed = grand_new > 0 or grand_removed > 0
+          if changed:
+              with data_file.open('w') as f:
+                  json.dump(all_data, f, ensure_ascii=False, separators=(',', ':'))
+          set_changed(changed)
+          print(f"\n=== RESUMO: +{grand_new} adicionados, {grand_removed} refeitos ===")
           PY
 
       - name: Update meta
+        if: steps.backfill.outputs.changed == 'true'
         run: |
           python3 << 'PY'
-          import json, os
+          import json
           from datetime import datetime, timezone
           with open('data/series.json') as f:
               data = json.load(f)
@@ -175,13 +188,21 @@ jobs:
           PY
 
       - name: Commit
+        if: steps.backfill.outputs.changed == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A data/
           if git diff --quiet --cached; then
             echo "No changes"
-          else
-            git commit -m "backfill ${{ inputs.series }}"
-            git push
+            exit 0
           fi
+          git commit -m "backfill all"
+          for i in 1 2 3 4 5; do
+            if git push; then echo "OK pushed"; exit 0; fi
+            echo "push rejeitado, integrando remoto (tentativa $i)..."
+            git pull --rebase --autostash origin main || true
+            sleep $((RANDOM % 4 + 2))
+          done
+          echo "::error::push falhou apos varias tentativas"
+          exit 1
