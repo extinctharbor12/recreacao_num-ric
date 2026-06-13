@@ -109,11 +109,19 @@ jobs:
               exp = EXPECTED.get(SERIES)
               removed = 0
               if exp:
-                  bad = [d.get('id') for d in existing if len(d.get('values', []) or []) != exp]
+                  # So refaz registros TRUNCADOS (menos dezenas que o esperado).
+                  # Concursos ESPECIAIS sorteiam MAIS dezenas que o normal
+                  # (ex.: timemania 1307 = 8 dezenas, indicadorConcursoEspecial=1),
+                  # entao len(values) > exp e legitimo. Tratar != exp como "ruim"
+                  # fazia o 1307 ser removido+refeito+readicionado a cada run,
+                  # gerando commit em loop. Aqui so contam os curtos demais.
+                  bad = [d.get('id') for d in existing
+                         if 0 < len(d.get('values', []) or []) < exp]
                   if bad:
                       removed = len(bad)
-                      existing = [d for d in existing if len(d.get('values', []) or []) == exp]
-                      print(f"  ! removidos {removed} malformado(s): {bad}")
+                      existing = [d for d in existing
+                                  if not (0 < len(d.get('values', []) or []) < exp)]
+                      print(f"  ! removidos {removed} truncado(s): {bad}")
 
               existing_ids = set(d.get('id') for d in existing)
               missing = [n for n in range(1, latest_id + 1) if n not in existing_ids]
@@ -131,6 +139,12 @@ jobs:
                   try:
                       elements = sorted([int(x) for x in raw.get('listaDezenas', []) or []])
                       if not elements: continue
+                      # Nao readiciona registro truncado (upstream meio publicado):
+                      # deixa como gap para o proximo ciclo em vez de recriar o loop.
+                      exp_n = EXPECTED.get(SERIES)
+                      if exp_n and len(elements) < exp_n:
+                          print(f"    x skip {n}: truncado ({len(elements)}<{exp_n})")
+                          continue
                       rec = {'id': raw['numero'], 'date': raw.get('dataApuracao', ''), 'values': elements}
                       if '/' in rec['date']:
                           d, m, y = rec['date'].split('/')
