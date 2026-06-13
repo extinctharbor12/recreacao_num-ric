@@ -132,14 +132,20 @@ def update_series(key, data):
         return {'added': 0, 'source_failed': True}
 
     existing_list = data.get(key, [])
-    latest_local = max([d.get('id', 0) for d in existing_list]) if existing_list else 0
+    existing_ids = {d.get('id') for d in existing_list if d.get('id')}
+    latest_local = max(existing_ids) if existing_ids else 0
 
-    print(f"  local={latest_local} upstream={latest_remote}", flush=True)
-    if latest_remote <= latest_local:
+    # Procura buracos REAIS (qualquer id ausente até o upstream), não apenas os
+    # acima do maior id local. Assim uma falha pontual num concurso do meio se
+    # auto-corrige no ciclo seguinte, em vez de virar gap permanente que obriga
+    # rodar o backfill.
+    missing = [n for n in range(1, latest_remote + 1) if n not in existing_ids]
+
+    print(f"  local={latest_local} upstream={latest_remote} gaps={len(missing)}", flush=True)
+    if not missing:
         print(f"  ✓ up to date", flush=True)
         return {'added': 0, 'source_failed': False}
 
-    missing = list(range(latest_local + 1, latest_remote + 1))
     print(f"  fetching {len(missing)} record(s)...", flush=True)
 
     new_records = []
