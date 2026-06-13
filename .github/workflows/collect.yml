@@ -50,20 +50,13 @@ jobs:
               should_run = True
               reason = "main window"
           elif is_retry:
-              if state.get('last_status') == 'error':
-                  last_err = state.get('last_error_at', '')
-                  try:
-                      le = datetime.fromisoformat(last_err)
-                      if (now - le) < timedelta(hours=24):
-                          should_run = True
-                          reason = "retry"
-                      else:
-                          reason = "old error, skipping retry"
-                  except Exception:
-                      should_run = True
-                      reason = "retry (invalid timestamp)"
-              else:
-                  reason = "retry window but last run OK"
+              # Segunda janela diária (06:00 BR): SEMPRE coleta. Vários sorteios
+              # só saem à noite e podem não estar publicados na janela principal
+              # (16:00 BR); rodar de manhã pega os concursos publicados depois.
+              # A coleta é idempotente e preenche buracos, então rodar de novo
+              # não tem custo de dados — só não pular.
+              should_run = True
+              reason = "second daily window"
           else:
               should_run = True
               reason = "manual"
