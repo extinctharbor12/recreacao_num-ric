@@ -1,0 +1,67 @@
+name: Collector Special (Federal + Loteca)
+
+on:
+  schedule:
+    - cron: '30 19 * * *'   # ~16:30 BR — depois do collector principal
+    - cron: '30 9 * * *'    # ~06:30 BR (retry)
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: pip install requests
+
+      - name: Collect (federal + loteca)
+        id: collect
+        continue-on-error: true
+        run: python collect-special.py
+
+      - name: Update meta (success)
+        if: steps.collect.outcome == 'success'
+        run: |
+          python3 << 'PY'
+          import json, os
+          from datetime import datetime, timezone
+          with open('data/special.json') as f:
+              data = json.load(f)
+          counts = {k: len(v) for k, v in data.items() if isinstance(v, list)}
+          now = datetime.now(timezone.utc)
+          meta = {
+              'updated_at': now.isoformat(),
+              'total': sum(counts.values()),
+              'counts': counts,
+              'version': int(now.timestamp()),
+          }
+          with open('data/special_metadata.json', 'w') as f:
+              json.dump(meta, f, indent=2)
+          print('counts:', counts, flush=True)
+          PY
+
+      - name: Commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A data/ 2>/dev/null || true
+          if git diff --quiet --cached; then
+            echo "No changes."
+          else
+            git commit -m "special: federal + loteca"
+            git push
+            echo "Pushed"
+          fi
+
+      - name: Fail if collector errored
+        if: steps.collect.outcome == 'failure'
+        run: |
+          echo "::error::Special collector failed."
+          exit 1
