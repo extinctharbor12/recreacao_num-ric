@@ -1,16 +1,16 @@
 {
-  "updated_at": "2026-08-21T19:31:48.705399+00:00",
-  "total": 24852,
+  "updated_at": "2026-08-22T09:22:41.258351+00:00",
+  "total": 24858,
   "counts": {
     "senarius": 3047,
-    "quindecim": 3767,
-    "mensarius": 1277,
-    "quinarius": 7097,
-    "vigintus": 2965,
+    "quindecim": 3768,
+    "mensarius": 1278,
+    "quinarius": 7098,
+    "vigintus": 2966,
     "septenus": 2431,
-    "duplex": 2998,
-    "septemcol": 888,
+    "duplex": 2999,
+    "septemcol": 889,
     "senatrev": 382
   },
-  "version": 1787340708
+  "version": 1787390561
 }
