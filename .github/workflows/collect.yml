@@ -88,7 +88,9 @@ jobs:
         if: steps.decide.outputs.should_run == 'true'
         id: collect
         continue-on-error: true
-        run: python collect.py
+        run: |
+          set -o pipefail
+          python collect.py 2>&1 | tee collect.out
 
       - name: Verify (debug)
         if: steps.decide.outputs.should_run == 'true' && steps.collect.outcome == 'success'
@@ -162,6 +164,11 @@ jobs:
               f.write(f"Error at {now.isoformat()}\n")
               f.write(f"Run: {server}/{repo}/actions/runs/{rid}\n")
               f.write(f"Rescheduled for: next day 09:00 UTC\n")
+              # o motivo de verdade: a saída da etapa Collect
+              if os.path.exists('collect.out'):
+                  f.write("\n━━━ saída do collect.py ━━━\n")
+                  with open('collect.out', encoding='utf-8', errors='replace') as o:
+                      f.write(o.read())
           print(f"✗ Error logged: {log_name}", flush=True)
           PY
 

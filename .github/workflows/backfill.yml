@@ -67,6 +67,9 @@ jobs:
                   with open(go, 'a') as f:
                       f.write(f"changed={'true' if v else 'false'}\n")
 
+          class Bloqueio(Exception):
+              """HTTP 403/429: a fonte recusou. Parar tudo, sem nova tentativa."""
+
           def http_get_json(url, retries=4):
               for i in range(retries):
                   try:
@@ -74,11 +77,24 @@ jobs:
                           'User-Agent': 'Mozilla/5.0 (compatible; SeriesCollector/1.0)',
                           'Accept': 'application/json',
                       })
+                      if r.status_code in (403, 429):
+                          raise Bloqueio(f"HTTP {r.status_code} em {url}")
                       r.raise_for_status()
                       return r.json()
+                  except Bloqueio:
+                      raise
                   except Exception:
                       if i < retries - 1: time.sleep(2 ** i)
               return None
+
+          bloqueio = []
+          def pegar(url):
+              try:
+                  return http_get_json(url)
+              except Bloqueio as e:
+                  bloqueio.append(str(e))
+                  print(f"  ⛔ BLOQUEIO: {e} - parando tudo, sem nova tentativa", flush=True)
+                  return None
 
           if WHICH == 'all':
               targets = list(PATHS.keys())
@@ -97,9 +113,11 @@ jobs:
           grand_removed = 0
 
           for SERIES in targets:
+              if bloqueio: break
               path = PATHS[SERIES]
               print(f"\n=== {SERIES} ({path}) ===", flush=True)
-              latest = http_get_json(f"{base}{path}/")
+              latest = pegar(f"{base}{path}/")
+              if bloqueio: break
               if not latest or 'numero' not in latest:
                   print(f"  ! upstream indisponivel para {path} - pulando")
                   continue
@@ -132,7 +150,8 @@ jobs:
 
               new_records = []
               for i, n in enumerate(missing, 1):
-                  raw = http_get_json(f"{base}{path}/{n}")
+                  raw = pegar(f"{base}{path}/{n}")
+                  if bloqueio: break          # o que já veio desta série é mantido abaixo
                   if not raw or 'numero' not in raw:
                       print(f"    x skip {n}: no data")
                       continue
@@ -175,6 +194,12 @@ jobs:
                   json.dump(all_data, f, ensure_ascii=False, separators=(',', ':'))
           set_changed(changed)
           print(f"\n=== RESUMO: +{grand_new} adicionados, {grand_removed} refeitos ===")
+          if bloqueio:
+              print(f"\n⛔ A fonte recusou ({bloqueio[0]}). Nenhuma outra chamada foi feita.", flush=True)
+              go = os.environ.get('GITHUB_OUTPUT')
+              if go:
+                  with open(go, 'a') as f:
+                      f.write("bloqueado=true\n")
           PY
 
       - name: Update meta
@@ -219,4 +244,10 @@ jobs:
             sleep $((RANDOM % 4 + 2))
           done
           echo "::error::push falhou apos varias tentativas"
+          exit 1
+
+      - name: Fail if source blocked
+        if: steps.backfill.outputs.bloqueado == 'true'
+        run: |
+          echo "::error::A fonte recusou (403/429). O backfill parou na primeira recusa, sem nova tentativa."
           exit 1

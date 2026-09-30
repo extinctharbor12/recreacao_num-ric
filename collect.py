@@ -41,6 +41,11 @@ SERIES = {
 DATA_FILE = Path(__file__).parent / 'data' / 'series.json'
 
 
+class Bloqueio(Exception):
+    """A fonte RECUSOU (HTTP 403/429). Parar tudo na hora: sem nova tentativa
+    e sem passar para as outras séries — insistir só prolonga o bloqueio."""
+
+
 def http_get_json(url, timeout=30, max_retries=4):
     last_err = None
     for attempt in range(max_retries):
@@ -49,8 +54,12 @@ def http_get_json(url, timeout=30, max_retries=4):
                 'User-Agent': USER_AGENT,
                 'Accept': 'application/json',
             }, verify=True)
+            if r.status_code in (403, 429):
+                raise Bloqueio(f"HTTP {r.status_code} em {url}")
             r.raise_for_status()
             return r.json()
+        except Bloqueio:
+            raise
         except Exception as e:
             last_err = e
             if attempt < max_retries - 1:
@@ -150,31 +159,33 @@ def update_series(key, data):
 
     new_records = []
     failed = []
-    for i, n in enumerate(missing, 1):
-        raw = fetch_record(path, n)
-        rec = normalize(raw, meta)
-        if rec:
-            new_records.append(rec)
-            if i % 50 == 0 or i == len(missing):
-                print(f"    [{i}/{len(missing)}] id {n}", flush=True)
-        else:
-            failed.append(n)
-        time.sleep(0.4)
-
-    if failed:
-        print(f"  retrying {len(failed)} failures...", flush=True)
-        for n in failed[:]:
+    try:
+        for i, n in enumerate(missing, 1):
             raw = fetch_record(path, n)
             rec = normalize(raw, meta)
             if rec:
                 new_records.append(rec)
-                failed.remove(n)
-            time.sleep(1.0)
-        if failed:
-            print(f"  ⚠ {len(failed)} still failed: {failed[:5]}{'...' if len(failed)>5 else ''}", flush=True)
+                if i % 50 == 0 or i == len(missing):
+                    print(f"    [{i}/{len(missing)}] id {n}", flush=True)
+            else:
+                failed.append(n)
+            time.sleep(0.4)
 
-    if new_records:
-        data[key] = sorted(existing_list + new_records, key=lambda x: x.get('id', 0))
+        if failed:
+            print(f"  retrying {len(failed)} failures...", flush=True)
+            for n in failed[:]:
+                raw = fetch_record(path, n)
+                rec = normalize(raw, meta)
+                if rec:
+                    new_records.append(rec)
+                    failed.remove(n)
+                time.sleep(1.0)
+            if failed:
+                print(f"  ⚠ {len(failed)} still failed: {failed[:5]}{'...' if len(failed)>5 else ''}", flush=True)
+    finally:
+        # mesmo se vier um Bloqueio no meio, o que já chegou é guardado
+        if new_records:
+            data[key] = sorted(existing_list + new_records, key=lambda x: x.get('id', 0))
 
     return {'added': len(new_records), 'source_failed': False, 'still_missing': len(failed)}
 
@@ -183,26 +194,36 @@ def main():
     print(f"═══ Collector started at {datetime.now(timezone.utc).isoformat()} ═══", flush=True)
     data = load_existing()
 
-    total_new = 0
+    contar = lambda d: sum(len(v) for v in d.values() if isinstance(v, list))
+    antes = contar(data)
     source_failures = 0
     series_count = len(SERIES)
+    bloqueio = None
 
     for key in SERIES.keys():
         try:
             result = update_series(key, data)
-            total_new += result.get('added', 0)
             if result.get('source_failed'):
                 source_failures += 1
+        except Bloqueio as e:
+            bloqueio = e
+            print(f"  ⛔ BLOQUEIO: {e} — parando tudo, sem nova tentativa", flush=True)
+            break
         except Exception as e:
             print(f"  ❌ exception in {key}: {e}", flush=True)
             source_failures += 1
 
+    total_new = contar(data) - antes
     if total_new > 0:
         save_data(data)
         total = sum(len(v) for k, v in data.items() if isinstance(v, list))
         print(f"\n✓ {total_new} new | total: {total}", flush=True)
     else:
         print(f"\n✓ Nothing new.", flush=True)
+
+    if bloqueio:
+        print(f"\n⛔ A fonte recusou ({bloqueio}). Nenhuma outra chamada foi feita.", flush=True)
+        sys.exit(1)
 
     failure_rate = source_failures / series_count
     if failure_rate >= 0.5:
