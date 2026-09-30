@@ -1,9 +1,12 @@
 name: Collector Special (Federal + Loteca)
 
 on:
-  schedule:
-    - cron: '30 19 * * *'   # ~16:30 BR — depois do collector principal
-    - cron: '30 9 * * *'    # ~06:30 BR (retry)
+  # Horários automáticos DESLIGADOS em 30/09/2026: desde 28/09 a fonte recusa (403)
+  # as chamadas que saem do GitHub. A coleta agora roda no PC
+  # (boloes-lab/agente/coletar-base.js) e publica aqui. Para religar, descomente:
+  # schedule:
+  #   - cron: '30 19 * * *'   # ~16:30 BR — depois do collector principal
+  #   - cron: '30 9 * * *'    # ~06:30 BR (retry)
   workflow_dispatch:
 
 jobs:

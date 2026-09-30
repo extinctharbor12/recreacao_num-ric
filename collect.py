@@ -7,6 +7,7 @@
 """
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -15,6 +16,9 @@ from datetime import datetime, timezone
 import requests
 
 USER_AGENT = 'Mozilla/5.0 (compatible; SeriesCollector/1.0)'
+
+# Pausa entre chamadas (s). 0.4 no GitHub; o PC usa COLETOR_PAUSA=2 (mais gentil).
+PAUSA = float(os.environ.get('COLETOR_PAUSA', '0.4'))
 
 # Endpoint base é montado em runtime a partir destes fragmentos
 # para evitar referência textual ao provedor no código-fonte público.
@@ -136,6 +140,7 @@ def update_series(key, data):
     print(f"\n▸ {key}", flush=True)
 
     latest_remote = fetch_latest_id(path)
+    time.sleep(PAUSA)
     if latest_remote is None:
         print(f"  ✗ source unavailable, keeping existing", flush=True)
         return {'added': 0, 'source_failed': True}
@@ -169,7 +174,7 @@ def update_series(key, data):
                     print(f"    [{i}/{len(missing)}] id {n}", flush=True)
             else:
                 failed.append(n)
-            time.sleep(0.4)
+            time.sleep(PAUSA)
 
         if failed:
             print(f"  retrying {len(failed)} failures...", flush=True)
@@ -179,7 +184,7 @@ def update_series(key, data):
                 if rec:
                     new_records.append(rec)
                     failed.remove(n)
-                time.sleep(1.0)
+                time.sleep(max(1.0, PAUSA))
             if failed:
                 print(f"  ⚠ {len(failed)} still failed: {failed[:5]}{'...' if len(failed)>5 else ''}", flush=True)
     finally:

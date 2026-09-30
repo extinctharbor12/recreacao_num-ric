@@ -1,9 +1,12 @@
 name: Collector
 
 on:
-  schedule:
-    - cron: '0 19 * * *'   # 16:00 BR
-    - cron: '0 9 * * *'    # 06:00 BR (retry)
+  # Horários automáticos DESLIGADOS em 30/09/2026: desde 28/09 a fonte recusa (403)
+  # as chamadas que saem do GitHub. A coleta agora roda no PC
+  # (boloes-lab/agente/coletar-base.js) e publica aqui. Para religar, descomente:
+  # schedule:
+  #   - cron: '0 19 * * *'   # 16:00 BR
+  #   - cron: '0 9 * * *'    # 06:00 BR (retry)
   workflow_dispatch:
 
 jobs:
