@@ -1,0 +1,13 @@
+Error at 2026-09-30T13:04:05.777920+00:00
+Run: https://github.com/extinctharbor12/recreacao_num-ric/actions/runs/36718033110
+Rescheduled for: next day 09:00 UTC
+
+━━━ saída do collect.py ━━━
+═══ Collector started at 2026-09-30T13:04:05.207900+00:00 ═══
+
+▸ senarius
+  ⛔ BLOQUEIO: HTTP 403 em https://servicebus2.caixa.gov.br/portaldeloterias/api/megasena/ — parando tudo, sem nova tentativa
+
+✓ Nothing new.
+
+⛔ A fonte recusou (HTTP 403 em https://servicebus2.caixa.gov.br/portaldeloterias/api/megasena/). Nenhuma outra chamada foi feita.
