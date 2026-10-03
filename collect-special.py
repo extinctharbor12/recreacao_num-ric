@@ -8,17 +8,19 @@
   jogos de futebol (coluna 1/X/2). Por isso têm schema próprio e um
   arquivo de saída próprio: data/special.json.
 
-  IMPORTANTE — VERIFIQUE OS CAMPOS NA 1ª EXECUÇÃO:
-  Os nomes exatos dos campos do upstream para Federal/Loteca podem
-  variar. Este coletor é DEFENSIVO (tenta várias chaves) e, no 1º
-  registro novo de cada série, imprime as chaves cruas (DEBUG_KEYS)
-  para você conferir e ajustar normalize_* se preciso. Rode uma vez
-  via workflow_dispatch e olhe o log.
+  CAMPOS (conferidos em 03/10/2026 nos registros reais Federal 6105 e Loteca 1272):
+  Federal: bilhetes em listaDezenas (ordem dos prêmios), valores em
+  listaRateioPremio[faixa].valorPremio. Loteca: jogos em
+  listaResultadoEquipeEsportiva (nuSequencial); o 1/X/2 sai dos gols, porque
+  "resultado" vem vazio. Registro sem esse conteúdo NÃO é gravado (mesmo
+  critério do app). O histórico é completado do mais novo para o mais antigo,
+  ESPECIAL_LOTE concursos por série a cada execução.
 ═══════════════════════════════════════════════════════════════════
 """
 
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -30,6 +32,9 @@ USER_AGENT = 'Mozilla/5.0 (compatible; SeriesCollector/1.0)'
 
 # Pausa entre chamadas (s). 0.4 no GitHub; o PC usa COLETOR_PAUSA=2 (mais gentil).
 PAUSA = float(os.environ.get('COLETOR_PAUSA', '0.4'))
+# Concursos buscados por série a cada execução, do mais novo ao mais antigo (o reparo do
+# histórico é gradual para não pesar na fonte). O PC usa um lote menor.
+LOTE = int(os.environ.get('ESPECIAL_LOTE', '30'))
 
 # Endpoint base montado em runtime (mesmo padrão do collect.py).
 _HOST_FRAGMENTS = ['servicebus2', '.', 'caixa', '.gov.br']  # required by upstream API path
@@ -114,63 +119,75 @@ def _debug_keys(key, raw):
 
 
 def normalize_tickets(raw):
-    """FEDERAL → {id, date, prizes:[{faixa, bilhete, valor}]}."""
+    """FEDERAL → {id, date, prizes:[{faixa, bilhete, valor}]}.
+    Bilhetes premiados: listaDezenas (na ordem dos prêmios, ex. "041092");
+    valores: listaRateioPremio[faixa].valorPremio. ("descricaoFaixa" é só o texto
+    "1 acertos" — era o que ia para o bilhete antes, e o app descartava.)"""
     if not raw:
         return None
     rid = raw.get('numero')
     if not rid:
         return None
-    prizes = []
-    lst = _first(raw, ['listaRateioPremio', 'listaPremios', 'premios'], []) or []
-    for i, p in enumerate(lst, 1):
-        if not isinstance(p, dict):
-            continue
-        prizes.append({
-            'faixa':   _first(p, ['numeroFaixa', 'faixa'], i),
-            'bilhete': str(_first(p, ['numeroBilhete', 'bilhete', 'descricaoFaixa'], '')).strip(),
-            'valor':   _first(p, ['valorPremio', 'valor'], 0),
-        })
-    rec = {'id': rid, 'date': parse_date(raw.get('dataApuracao', '')), 'prizes': prizes}
-    return rec
+    bilhetes = _first(raw, ['listaDezenas', 'dezenasSorteadasOrdemSorteio'], []) or []
+    valor = {}
+    for p in raw.get('listaRateioPremio') or []:
+        if isinstance(p, dict) and p.get('faixa') is not None:
+            valor[int(p['faixa'])] = p.get('valorPremio') or 0
+    prizes = [{'faixa': i, 'bilhete': str(bl).strip(), 'valor': valor.get(i, 0)} for i, bl in enumerate(bilhetes, 1)]
+    return {'id': rid, 'date': parse_date(raw.get('dataApuracao', '')), 'prizes': prizes}
+
+
+def _resultado(gh, ga):
+    if gh is None or ga is None:
+        return ''
+    return '1' if gh > ga else '2' if ga > gh else 'X'
 
 
 def normalize_matches(raw):
-    """LOTECA → {id, date, matches:[{home, away, result}]}."""
+    """LOTECA → {id, date, matches:[{home, away, goalsHome, goalsAway, result, countryHome, countryAway, championship}]}.
+    Jogos: listaResultadoEquipeEsportiva, na ordem de nuSequencial. O campo "resultado"
+    vem vazio da fonte; o 1/X/2 sai dos gols (o mesmo formato do seed do app)."""
     if not raw:
         return None
     rid = raw.get('numero')
     if not rid:
         return None
-    # acha a lista de eventos entre chaves candidatas
-    events = _first(raw, ['listaEventos', 'eventos', 'jogos', 'listaResultados', 'listaJogos'], [])
+    events = _first(raw, ['listaResultadoEquipeEsportiva'], []) or []
     if not isinstance(events, list):
         events = []
+    events = sorted([e for e in events if isinstance(e, dict)], key=lambda e: e.get('nuSequencial') or 0)
     matches = []
     for e in events:
-        if not isinstance(e, dict):
-            continue
+        gh, ga = e.get('nuGolEquipeUm'), e.get('nuGolEquipeDois')
+        res = str(e.get('resultado') or '').strip().upper()
         matches.append({
-            'home':   str(_first(e, ['nomeEquipeMandante', 'mandante', 'timeMandante', 'casa'], '')).strip(),
-            'away':   str(_first(e, ['nomeEquipeVisitante', 'visitante', 'timeVisitante', 'fora'], '')).strip(),
-            'result': str(_first(e, ['resultado', 'sinalResultado', 'coluna', 'posicaoResultado'], '')).strip(),
+            'home': str(e.get('nomeEquipeUm') or '').strip(),
+            'away': str(e.get('nomeEquipeDois') or '').strip(),
+            'goalsHome': gh, 'goalsAway': ga,
+            'result': res if res in ('1', 'X', '2') else _resultado(gh, ga),
+            'countryHome': str(e.get('siglaPaisUm') or '').strip(),
+            'countryAway': str(e.get('siglaPaisDois') or '').strip(),
+            'championship': str(e.get('nomeCampeonato') or '').strip(),
         })
-    # fallback: nome único do evento (ex.: "Time A x Time B")
-    if not matches:
-        for e in events:
-            if isinstance(e, dict):
-                matches.append({'home': '', 'away': '', 'result': str(_first(e, ['nomeEvento', 'descricao'], '')).strip()})
-    rec = {'id': rid, 'date': parse_date(raw.get('dataApuracao', '')), 'matches': matches}
-    return rec
+    return {'id': rid, 'date': parse_date(raw.get('dataApuracao', '')), 'matches': matches}
+
+
+def valido(kind, rec):
+    """Registro com conteúdo útil — o mesmo critério do app (dataSync.specialSeriesUsable)."""
+    if not rec:
+        return False
+    if kind == 'tickets':
+        return any(re.fullmatch(r'\d{4,}', p.get('bilhete', '')) for p in rec.get('prizes') or [])
+    return any(m.get('home') and m.get('away') for m in rec.get('matches') or [])
 
 
 def normalize(raw, kind, key):
-    if raw:
-        _debug_keys(key, raw)
     try:
-        return normalize_tickets(raw) if kind == 'tickets' else normalize_matches(raw)
+        rec = normalize_tickets(raw) if kind == 'tickets' else normalize_matches(raw)
     except Exception as e:
         print(f"    ✗ parse error: {e}", flush=True)
         return None
+    return rec if valido(kind, rec) else None                 # vazio não entra
 
 
 def load_existing():
@@ -205,15 +222,20 @@ def update_series(key, data):
         print("  ✗ source unavailable, keeping existing", flush=True)
         return {'added': 0, 'source_failed': True}
 
-    existing_list = data.get(key, [])
-    latest_local = max([d.get('id', 0) for d in existing_list]) if existing_list else 0
-    print(f"  local={latest_local} upstream={latest_remote}", flush=True)
-    if latest_remote <= latest_local:
+    antes = data.get(key, [])
+    existing_list = [d for d in antes if valido(kind, d)]
+    if len(existing_list) != len(antes):
+        print(f"  removidos {len(antes) - len(existing_list)} registro(s) vazio(s) (formato antigo)", flush=True)
+        data[key] = existing_list
+    have = {d.get('id') for d in existing_list}
+    faltam = [n for n in range(latest_remote, 0, -1) if n not in have]   # mais novo primeiro
+    print(f"  local={len(existing_list)} upstream={latest_remote} faltam={len(faltam)} lote={LOTE}", flush=True)
+    if not faltam:
         print("  ✓ up to date", flush=True)
         return {'added': 0, 'source_failed': False}
 
-    missing = list(range(latest_local + 1, latest_remote + 1))
-    print(f"  fetching {len(missing)} record(s)...", flush=True)
+    missing = faltam[:LOTE]
+    print(f"  fetching {len(missing)} record(s) ({missing[0]}..{missing[-1]})...", flush=True)
 
     new_records, failed = [], []
     try:
@@ -241,15 +263,14 @@ def update_series(key, data):
         # mesmo se vier um Bloqueio no meio, o que já chegou é guardado
         if new_records:
             data[key] = sorted(existing_list + new_records, key=lambda x: x.get('id', 0))
-    return {'added': len(new_records), 'source_failed': False, 'still_missing': len(failed)}
+    return {'added': len(new_records), 'source_failed': False, 'still_missing': len(faltam) - len(new_records)}
 
 
 def main():
     print(f"═══ Special collector started at {datetime.now(timezone.utc).isoformat()} ═══", flush=True)
     data = load_existing()
 
-    contar = lambda d: sum(len(v) for v in d.values() if isinstance(v, list))
-    antes = contar(data)
+    antes = {k: list(data.get(k, [])) for k in SPECIALS}
     source_failures, bloqueio = 0, None
     for key in SPECIALS:
         try:
@@ -263,12 +284,15 @@ def main():
         except Exception as e:
             print(f"  ❌ exception in {key}: {e}", flush=True)
             source_failures += 1
-    total_new = contar(data) - antes
+    ids_antes = {k: {id(d) for d in antes[k]} for k in SPECIALS}
+    ids_depois = {k: {id(d) for d in data.get(k, [])} for k in SPECIALS}
+    total_new = sum(len(ids_depois[k] - ids_antes[k]) for k in SPECIALS)
+    removidos = sum(len(ids_antes[k] - ids_depois[k]) for k in SPECIALS)
 
-    if total_new > 0:
+    if total_new > 0 or removidos > 0:
         save_data(data)
         total = sum(len(v) for v in data.values() if isinstance(v, list))
-        print(f"\n✓ {total_new} new | total: {total}", flush=True)
+        print(f"\n✓ {total_new} new · {removidos} vazio(s) removido(s) | total: {total}", flush=True)
     else:
         print("\n✓ Nothing new.", flush=True)
 
