@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-10-04T01:02:07.564913+00:00",
-  "total": 30,
+  "updated_at": "2026-10-05T01:02:31.221300+00:00",
+  "total": 60,
   "counts": {
-    "federal": 15,
-    "loteca": 15
+    "federal": 30,
+    "loteca": 30
   },
-  "version": 1791075727
+  "version": 1791162151
 }
